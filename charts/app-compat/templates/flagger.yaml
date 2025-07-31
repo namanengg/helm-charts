@@ -1,0 +1,78 @@
+{{- if .Values.canary.enabled }}
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: {{ template ".Chart.Name .fullname" $ }}-canary
+  labels:
+    {{- include "application.labels" . | nindent 4 }}
+{{- if $.Values.appLabels }}
+{{ toYaml $.Values.appLabels | indent 4 }}
+{{- end }}
+{{- if .Values.canary.annotations }}
+  annotations:
+{{ toYaml .Values.canary.annotations | indent 4 }}
+{{- end }}
+spec:
+  provider: {{ $.Values.canary.provider }}
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ template "application.name" . }}
+{{- if eq "apisix" $.Values.canary.provider }}
+  routeRef:
+    apiVersion: apisix.apache.org/v2
+    kind: ApisixRoute
+    name: {{ template "application.name" . }}
+{{- else if $.Values.autoscaling.enabled }}
+  autoscalerRef:
+    apiVersion: autoscaling/v1
+    kind: HorizontalPodAutoscaler
+    name: {{ template "application.name" . }}-hpa
+{{- end }}
+  service:
+    portDiscovery: {{ .Values.canary.service.portDiscovery }}
+    port: {{ .Values.canary.service.port }}
+    targetPort: {{ .Values.canary.service.targetPort }}
+    {{- if .Values.canary.service.appProtocol }}
+    appProtocol: {{ .Values.canary.service.appProtocol }}
+    {{- end }}
+    {{- if .Values.canary.service.retries }}
+    retries:
+{{ toYaml .Values.canary.service.retries | indent 6 }}
+    {{- end }}
+    {{- if .Values.canary.service.match }}
+    match:
+    {{- range .Values.canary.service.match }}
+      - uri:
+          prefix: {{ .uri.prefix  }}
+    {{- end }}
+    {{- end }}
+    {{- if .Values.canary.service.rewriteUri }}
+    rewrite:
+      uri: {{ .Values.canary.service.rewriteUri }}
+    {{- end }}
+    {{- if .Values.canary.service.timeout }}
+    timeout: {{ .Values.canary.service.timeout }}
+    {{- end }}
+  analysis:
+    interval: {{ .Values.canary.analysis.interval }}
+    threshold: {{ .Values.canary.analysis.threshold }}
+    maxWeight: {{ .Values.canary.analysis.maxWeight }}
+    stepWeight: {{ .Values.canary.analysis.stepWeight }}
+    metrics:
+    {{- range $key, $value := .Values.canary.analysis.metrics }}
+    - name: {{ $value.name }}
+      threshold: {{ $value.threshold }}
+      interval: {{ $value.interval }}
+    {{- end }}
+    {{- if .Values.canary.webhooks }}
+    webhooks:
+      {{- if .Values.canary.webhooks.loadtest.enabled }}
+      - name: load-test
+        url: {{ .Values.canary.webhooks.loadtest.url }}
+        timeout: 5s
+        metadata:
+          cmd: "hey -z 1m -q 10 -c 2 http://{{ include ".Chart.Name .fullname" $ }}-canary.{{ $.Release.Namespace }}:{{ $.Values.canary.service.targetPort }}/"
+      {{- end }}
+    {{- end }}
+{{- end }}
