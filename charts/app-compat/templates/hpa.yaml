@@ -1,0 +1,40 @@
+{{- if and ($.Values.autoscaling.enabled) (not $.Values.statefulset.enabled) }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ template "application.name" . }}-hpa
+  {{- if .Values.autoscaling.annotations }}
+  annotations:
+{{ toYaml .Values.autoscaling.annotations | indent 4 }}
+  {{- end }}
+  labels:
+    {{- include "application.labels" . | nindent 4 }}
+  {{- if .Values.autoscaling.labels }}
+{{ toYaml .Values.autoscaling.labels | indent 4 }}
+  {{- end }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ template "application.name" . }}
+  minReplicas: {{ $.Values.autoscaling.MinReplicas  }}
+  maxReplicas: {{ $.Values.autoscaling.MaxReplicas }}
+  metrics:
+  {{- if .Values.autoscaling.metrics }}
+    {{- toYaml .Values.autoscaling.metrics | nindent 4 }}
+  {{- else if $.Values.autoscaling.TargetCPUUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ $.Values.autoscaling.TargetCPUUtilizationPercentage }}
+  {{- end }}
+    {{- if $.Values.autoscaling.extraMetrics}}
+  {{- toYaml $.Values.autoscaling.extraMetrics | nindent 2 }}
+    {{- end}}
+  {{- if $.Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml $.Values.autoscaling.behavior | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,21 @@
+{{- if eq "true" (include "serviceMonitorEnabled" .) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ template "application.name" . }}
+  labels:
+    app: {{ template "application.name" . }}
+spec:
+  endpoints:
+    {{- range $.Values.ContainerPort }}
+    {{- if (.servicemonitor).enabled }}
+    - port: {{ .name | quote }}
+      path: {{ default "/metrics" (.servicemonitor).path }}
+      interval: {{ default "30s" (.servicemonitor).interval }}
+      scrapeTimeout: {{ default "20s" (.servicemonitor).scrapeTimeout }}
+    {{- end }}
+    {{- end }}
+  selector:
+    matchLabels:
+      app: {{ template "application.name" . }}
+{{- end }}

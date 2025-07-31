@@ -1,0 +1,584 @@
+{{- if .Values.statefulset.enabled }}
+  {{- $hasCMEnvExists := false -}}
+  {{- $hasCMVolumeExists := false -}}
+  {{- if .Values.externalConfigMaps }}
+  {{- range .Values.externalConfigMaps }}
+  {{- if eq .type "environment"}}
+  {{- $hasCMEnvExists = true}}
+  {{- else if .path}}
+  {{- $hasCMVolumeExists = true}}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+
+  {{- $hasSecretEnvExists := false -}}
+  {{- $hasSecretVolumeExists := false -}}
+  {{- if .Values.externalSecrets }}
+  {{- range .Values.externalSecrets }}
+  {{- if .path}}
+  {{- $hasSecretVolumeExists = true}}
+  {{- end }}
+  {{- if eq .type "environment"}}
+  {{- $hasSecretEnvExists = true}}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+
+  {{- $cloudProvider := .Values.cloud.provider }}
+  {{- $image := required "Undefined image for application container" .Values.deployment.image.repository }}
+  {{- with .Values.deployment.image.tag    }} {{- $image = print $image ":" . }} {{- end }}
+  {{- with .Values.deployment.image.digest }} {{- $image = print $image "@" . }} {{- end }}
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "application.name" . }}
+  labels:
+    {{- include "application.labels" . | nindent 4 }}
+{{- if .Values.deploymentLabels }}
+{{ toYaml .Values.deploymentLabels | indent 4 }}
+{{- end }}
+{{- if .Values.appLabels }}
+{{ toYaml .Values.appLabels | indent 4 }}
+{{- end }}
+
+{{- if .Values.deploymentAnnotations }}
+  annotations:
+{{ toYaml .Values.deploymentAnnotations | indent 4 }}
+{{- end }}
+
+spec:
+  selector:
+    matchLabels:
+{{ include "application.selectorLabels" . | indent 6 }}
+  replicas: {{ $.Values.replicaCount }}
+  minReadySeconds: {{ $.Values.MinReadySeconds }}
+  template:
+    metadata:
+    {{- if .Values.podAnnotations }}
+      annotations:
+      {{- range $key, $value := .Values.podAnnotations }}
+        {{ $key }}: {{ $value | quote }}
+      {{- end }}
+    {{- end }}
+      labels:
+{{ include "application.selectorLabels" . | indent 8 }}
+{{ include "pod.compatLabels" . | indent 8 }}
+{{- if .Values.appLabels }}
+{{ toYaml .Values.appLabels | indent 8 }}
+{{- end }}
+{{- if .Values.podLabels }}
+{{ toYaml .Values.podLabels | indent 8 }}
+{{- end }}
+    spec:
+{{- if $.Values.podExtraSpecs }}
+{{ toYaml .Values.podExtraSpecs | indent 6 }}
+{{- end }}
+      terminationGracePeriodSeconds: {{ $.Values.GracePeriod }}
+{{- if $.Values.hostAliases }}
+      hostAliases:
+{{ toYaml .Values.hostAliases | indent 8 }}
+{{- end }}
+{{- if and $.Values.Spec.Affinity.Key $.Values.Spec.Affinity.Values }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: {{ $.Values.Spec.Affinity.Key  }}
+                operator: In
+                values:
+                - {{ $.Values.Spec.Affinity.Values | default "nodes"  }}
+{{- end }}
+      serviceAccountName: {{ include "serviceAccountName" . }}
+      automountServiceAccountToken: {{ default false $.Values.serviceAccount.automountServiceAccountToken }}
+{{- if .Values.tolerations }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+    {{- else }}
+      tolerations: []
+  {{- end }}
+{{- if $.Values.imagePullSecrets}}
+      imagePullSecrets:
+  {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+  {{- end }}
+{{- end}}
+{{- if $.Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+{{- range $.Values.topologySpreadConstraints }}
+      - maxSkew: {{ .maxSkew }}
+        topologyKey: {{ .topologyKey }}
+        whenUnsatisfiable: {{ .whenUnsatisfiable }}
+        labelSelector:
+          matchLabels:
+          {{- if and .autoLabelSelector .customLabelSelector }}
+{{ toYaml .customLabelSelector | indent 12 }}
+          {{- else if .autoLabelSelector }}
+            app.kubernetes.io/name: {{ template "application.name" $ }}
+          {{- else if .customLabelSelector }}
+{{ toYaml .customLabelSelector | indent 12 }}
+          {{- end }}
+{{- end }}
+{{- end }}
+{{- if $.Values.podSecurityContext }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
+{{- end }}
+{{- if $.Values.restartPolicy }}
+      restartPolicy: {{  $.Values.restartPolicy }}
+{{- end }}
+      initContainers:
+{{- if eq $cloudProvider "gcp" }}
+        - image: livcr.io/generic/doitintl-gtoken:v0.4.3
+          name: gtoken-init
+          command:
+          - /gtoken
+          - --file=/var/run/secrets/aws/token/gtoken
+          - --refresh=false
+          volumeMounts:
+          - name: gtoken-vol
+            mountPath: /var/run/secrets/aws/token
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 50Mi
+{{- end }}
+{{- if $.Values.initContainers}}
+{{- $values := .Values }}
+{{- range $i, $c := $values.initContainers }}
+{{- if .reuseContainerImage}}
+        - name: {{ template "application.name" $ }}-init-{{ add1 $i }}
+          image: {{ $image }}
+          imagePullPolicy: {{ $values.image.pullPolicy }}
+{{- if .securityContext }}
+          securityContext:
+{{ toYaml .securityContext | indent 12 }}
+{{- end }}
+{{- if .command}}
+          command:
+{{ toYaml .command | indent 12 -}}
+{{- end}}
+          env:
+{{- range $values.EnvVariables }}
+{{- if and .name .value }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+{{- end }}
+{{- end }}
+{{- range $values.EnvVariablesFromSecretKeys }}
+{{- if and .name .secretName .keyName }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .keyName }}
+{{- end }}
+{{- end }}
+{{- range $values.EnvVariablesFromConfigMapKeys }}
+{{- if and .name .configMapName .keyName }}
+            - name: {{ .name }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .configMapName }}
+                  key: {{ .keyName }}
+{{- end }}
+{{- end }}
+{{- if or $hasCMEnvExists $hasSecretEnvExists .Values.externalSecretsv2.enabled }}
+          envFrom:
+{{- if ($values.externalConfigMaps)}}
+{{- range $configMap := $values.externalConfigMaps }}
+{{- if eq .type "environment" }}
+            - configMapRef:
+                name: {{ .name }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if ($values.externalSecrets)}}
+{{- range $configMap := $values.externalSecrets  }}
+{{- if eq .type "environment" }}
+            - secretRef:
+                name: {{ .name }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.externalSecretsv2.enabled }}
+{{- $application := ((.Values.global).application) | default .Values.application | default .Release.Name }}
+{{- range .Values.externalSecretsv2.secrets }}
+            - secretRef:
+                name: {{ $application }}-{{ . }}-secret
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .resources}}
+          resources:
+{{ toYaml .resources | indent 12 -}}
+{{- end}}
+{{- if .volumeMounts}}
+          volumeMounts:
+{{ toYaml .volumeMounts | indent 12 -}}
+{{- end}}
+{{- else}}
+        -
+{{ toYaml . | indent 10 }}
+{{- end}}
+{{- end}}
+{{- end}}
+      containers:
+{{- if $.Values.containers }}
+{{- range $i, $c := .Values.containers }}
+{{- if .reuseContainerImage}}
+        - name: {{ template "application.name" $ }}-sidecontainer-{{ add1 $i }}
+          image: {{ $image }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+{{- if .securityContext }}
+          securityContext:
+{{ toYaml .securityContext | indent 12 }}
+{{- end }}
+{{- if .command}}
+          command:
+{{ toYaml .command | indent 12 -}}
+{{- end}}
+{{- if .resources}}
+          resources:
+{{ toYaml .resources | indent 12 -}}
+{{- end}}
+{{- if .volumeMounts}}
+          volumeMounts:
+{{ toYaml .volumeMounts | indent 12 -}}
+{{- end}}
+{{- else}}
+        -
+{{ toYaml . | indent 10 }}
+{{- end}}
+{{- end}}
+{{- end}}
+{{- if eq $cloudProvider "gcp" }}
+        - image: livcr.io/generic/doitintl-gtoken:v0.4.3
+          name: gtoken
+          command:
+          - /gtoken
+          - --file=/var/run/secrets/aws/token/gtoken
+          - --refresh=true
+          volumeMounts:
+          - name: gtoken-vol
+            mountPath: /var/run/secrets/aws/token
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 50Mi
+{{- end}}
+        - name: {{ template "application.name" . }}
+          image: {{ $image }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          {{- if $.Values.containerSpec.lifecycle.enabled }}
+          lifecycle:
+           {{- if $.Values.containerSpec.lifecycle.preStop }}
+           preStop:
+{{ toYaml $.Values.containerSpec.lifecycle.preStop | indent 12 -}}
+           {{- end }}
+           {{- if $.Values.containerSpec.lifecycle.postStart }}
+           postStart:
+{{ toYaml $.Values.containerSpec.lifecycle.postStart | indent 12 -}}
+           {{- end }}
+          {{- end }}
+{{- if and $.Values.containerSecurityContext $.Values.privileged }}
+          securityContext:
+            privileged: true
+{{ toYaml .Values.containerSecurityContext | indent 12 }}
+{{- else if $.Values.privileged }}
+          securityContext:
+            privileged: true
+{{- else if $.Values.containerSecurityContext }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | indent 12 }}
+{{- end }}
+{{- if $.Values.containerExtraSpecs }}
+{{ toYaml .Values.containerExtraSpecs | indent 10 }}
+{{- end }}
+          ports:
+          {{- range $.Values.ContainerPort }}
+            - name: {{ .name}}
+              containerPort: {{ .port  }}
+              protocol: TCP
+          {{- end}}
+{{- if and $.Values.command.enabled $.Values.command.workingDir }}
+          workingDir: {{ $.Values.command.workingDir }}
+{{- end}}
+{{- if and $.Values.command.value $.Values.command.enabled}}
+          command:
+{{ toYaml $.Values.command.value | indent 12 -}}
+{{- end}}
+{{- if and $.Values.args.value $.Values.args.enabled}}
+          args:
+{{ toYaml $.Values.args.value | indent 12 -}}
+{{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- range $.Values.EnvVariablesFromFieldPath }}
+            - name: {{ .name }}
+              valueFrom:
+                fieldRef:
+                 fieldPath: {{ .fieldPath }}
+          {{- end}}
+          {{- range $.Values.EnvVariablesFromContainers }}
+            - name: {{ .name }}
+              valueFrom:
+                resourceFieldRef:
+                  containerName: {{ .container }}
+                  resource: {{ .resource }}
+          {{- end}}
+          {{- range $.Values.EnvVariables }}
+          {{- if and .name .value }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+          {{- end }}
+          {{- end }}
+          {{- if eq $cloudProvider "gcp" }}
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/aws/token/gtoken
+            - name: AWS_ROLE_ARN
+              value: {{ (index .Values "serviceAccount" "annotations" "eks.amazonaws.com/role-arn" ) }}
+            - name: AWS_ROLE_SESSION_NAME
+              value: gtoken-123
+            - name: AWS_REGION
+              value: ap-southeast-1
+            - name: AWS_DEFAULT_REGION
+              value: ap-southeast-1
+          {{- end }}
+          {{- range $.Values.EnvVariablesFromSecretKeys }}
+          {{- if and .name .secretName .keyName }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .keyName }}
+          {{- end }}
+          {{- end }}
+          {{- range $.Values.EnvVariablesFromConfigMapKeys }}
+          {{- if and .name .configMapName .keyName }}
+            - name: {{ .name }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .configMapName }}
+                  key: {{ .keyName }}
+          {{- end }}
+          {{- end }}
+          {{- if or $hasCMEnvExists $hasSecretEnvExists .Values.externalSecretsv2.enabled }}
+          envFrom:
+          {{- if (.Values.externalConfigMaps)}}
+          {{- range $configMap := .Values.externalConfigMaps  }}
+          {{- if eq .type "environment" }}
+            - configMapRef:
+                name: {{ .name }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- if (.Values.externalSecrets)}}
+          {{- range $configMap := .Values.externalSecrets  }}
+          {{- if eq .type "environment" }}
+            - secretRef:
+                name: {{ .name }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.externalSecretsv2.enabled }}
+          {{- $application := ((.Values.global).application) | default .Values.application | default .Release.Name }}
+          {{- range .Values.externalSecretsv2.secrets }}
+            - secretRef:
+                name: {{ $application }}-{{ . }}-secret
+          {{- end }}
+          {{- end }}
+          {{- end }}
+
+{{- if or $.Values.LivenessProbe.Path $.Values.LivenessProbe.command $.Values.LivenessProbe.tcp }}
+          livenessProbe:
+{{- if $.Values.LivenessProbe.Path }}
+            httpGet:
+              path: {{ $.Values.LivenessProbe.Path  }}
+              port: {{ $.Values.LivenessProbe.port }}
+            {{- if $.Values.LivenessProbe.httpHeaders }}
+              httpHeaders:
+              {{- range $.Values.LivenessProbe.httpHeaders}}
+                - name: {{.name}}
+                  value: {{.value}}
+              {{- end}}
+	    {{- end }}
+{{- end }}
+{{- if $.Values.LivenessProbe.command }}
+            exec:
+              command:
+{{ toYaml .Values.LivenessProbe.command | indent 16 }}
+{{- end}}
+{{- if and $.Values.LivenessProbe.tcp }}
+            tcpSocket:
+              port: {{ $.Values.LivenessProbe.port }}
+{{- end}}
+            initialDelaySeconds: {{ $.Values.LivenessProbe.initialDelaySeconds  }}
+            periodSeconds: {{ $.Values.LivenessProbe.periodSeconds  }}
+            successThreshold: {{ $.Values.LivenessProbe.successThreshold  }}
+            timeoutSeconds: {{ $.Values.LivenessProbe.timeoutSeconds  }}
+            failureThreshold: {{ $.Values.LivenessProbe.failureThreshold  }}
+{{- end }}
+{{- if or $.Values.ReadinessProbe.Path  $.Values.ReadinessProbe.command $.Values.ReadinessProbe.tcp }}
+          readinessProbe:
+{{- if $.Values.ReadinessProbe.Path }}
+            httpGet:
+              path: {{ $.Values.ReadinessProbe.Path  }}
+              port: {{ $.Values.ReadinessProbe.port }}
+            {{- if $.Values.ReadinessProbe.httpHeaders }}
+              httpHeaders:
+              {{- range $.Values.ReadinessProbe.httpHeaders}}
+                - name: {{.name}}
+                  value: {{.value}}
+              {{- end}}
+	    {{- end }}
+{{- end }}
+{{- if $.Values.ReadinessProbe.command }}
+            exec:
+              command:
+{{ toYaml .Values.ReadinessProbe.command | indent 16 }}
+{{- end}}
+{{- if and $.Values.ReadinessProbe.tcp }}
+            tcpSocket:
+              port: {{ $.Values.ReadinessProbe.port }}
+{{- end}}
+            initialDelaySeconds: {{ $.Values.ReadinessProbe.initialDelaySeconds  }}
+            periodSeconds: {{ $.Values.ReadinessProbe.periodSeconds  }}
+            successThreshold: {{ $.Values.ReadinessProbe.successThreshold  }}
+            timeoutSeconds: {{ $.Values.ReadinessProbe.timeoutSeconds  }}
+            failureThreshold: {{ $.Values.ReadinessProbe.failureThreshold  }}
+{{- end }}
+          resources:
+{{ toYaml $.Values.resources | trim | indent 12 }}
+{{- if or $.Values.StartupProbe.Path  $.Values.StartupProbe.command $.Values.StartupProbe.tcp }}
+          startupProbe:
+{{- if $.Values.StartupProbe.Path }}
+            httpGet:
+              path: {{ $.Values.StartupProbe.Path  }}
+              port: {{ $.Values.StartupProbe.port }}
+            {{- if $.Values.StartupProbe.httpHeaders }}
+              httpHeaders:
+              {{- range $.Values.StartupProbe.httpHeaders}}
+                - name: {{.name}}
+                  value: {{.value}}
+              {{- end}}
+        {{- end }}
+{{- end }}
+{{- if $.Values.StartupProbe.command }}
+            exec:
+              command:
+{{ toYaml .Values.StartupProbe.command | indent 16 }}
+{{- end}}
+{{- if and $.Values.StartupProbe.tcp }}
+            tcpSocket:
+              port: {{ $.Values.StartupProbe.port }}
+{{- end}}
+            initialDelaySeconds: {{ $.Values.StartupProbe.initialDelaySeconds  }}
+            periodSeconds: {{ $.Values.StartupProbe.periodSeconds  }}
+            successThreshold: {{ $.Values.StartupProbe.successThreshold  }}
+            timeoutSeconds: {{ $.Values.StartupProbe.timeoutSeconds  }}
+            failureThreshold: {{ $.Values.StartupProbe.failureThreshold  }}
+{{- end }}
+          volumeMounts:
+{{- with .Values.volumeMounts }}
+{{ toYaml . | trim | indent 12 }}
+{{- end }}
+            - name: {{ .Values.statefulset.volume.name }}
+              mountPath: {{ .Values.statefulset.volume.mountPath }}
+          {{- if eq $cloudProvider "gcp" }}
+            - name: gtoken-vol
+              mountPath: /var/run/secrets/aws/token
+            - name: aws-dir-volume
+              mountPath: /root/.aws
+          {{- end }}
+          {{- if and $hasCMVolumeExists (.Values.externalConfigMaps)}}
+          {{- range $configMap := .Values.externalConfigMaps  }}
+            {{- if $configMap.path  }}
+            {{- if $configMap.files  }}
+            {{- range $file := $configMap.files  }}
+            - mountPath: {{$configMap.path}}/{{$file}}
+              name: {{$configMap.name}}
+              readOnly: true
+              subPath: {{$file}}
+            {{- end}}
+            {{- else}}
+            - mountPath: {{$configMap.path}}
+              name: {{$configMap.name}}
+              readOnly: true
+            {{- end}}
+            {{- end}}
+            {{- end}}
+          {{- end}}
+          {{- if and $hasSecretVolumeExists .Values.externalSecrets }}
+          {{- range $secrets := .Values.externalSecrets  }}
+            {{- if and $secrets.path  }}
+            {{- if $secrets.files  }}
+            {{- range $file := $secrets.files  }}
+            - mountPath: {{$secrets.path}}/{{$file}}
+              name: {{$secrets.name}}
+              readOnly: true
+              subPath: {{$file}}
+            {{- end}}
+            {{- else}}
+            - mountPath: {{$secrets.path}}
+              name: {{$secrets.name}}
+              readOnly: true
+            {{- end}}
+            {{- end}}
+            {{- end}}
+            {{- end}}
+      volumes:
+{{- with .Values.volumes }}
+{{ toYaml . | trim | indent 8 }}
+{{- end }}
+      {{- if eq $cloudProvider "gcp" }}
+        - emptyDir: {}
+          name: aws-dir-volume
+        - emptyDir:
+            medium: Memory
+          name: gtoken-vol
+      {{- end }}
+      {{- if (.Values.externalConfigMaps)}}
+      {{- range $item := .Values.externalConfigMaps  }}
+        - name: {{$item.name}}
+          configMap:
+            name: {{$item.name}}
+            defaultMode: {{ default "420" $item.defaultMode }}
+      {{- end}}
+      {{- end}}
+      {{- if (.Values.externalSecrets)}}
+      {{- range $item := .Values.externalSecrets  }}
+        - name: {{$item.name}}
+          secret:
+            secretName: {{$item.name}}
+            defaultMode: {{ default "420" $item.defaultMode }}
+      {{- end}}
+      {{- end}}
+
+  revisionHistoryLimit: 3
+##  pauseForSecondsBeforeSwitchActive: {{ $.Values.pauseForSecondsBeforeSwitchActive }}
+#  waitForSecondsBeforeScalingDown: {{ $.Values.waitForSecondsBeforeScalingDown }}
+  updateStrategy:
+    {{- if eq .Values.deploymentType "ROLLING" }}
+    type: "RollingUpdate"
+    rollingUpdate:
+      partition: {{ $.Values.deployment.strategy.rolling.partition | default 0 }}
+    {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: {{ .Values.statefulset.volume.name }}
+    spec:
+      accessModes:
+        - {{ .Values.statefulset.volume.accessMode | default "ReadWriteOnce" }}
+      resources:
+        requests:
+          storage: {{ .Values.statefulset.volume.storage }}
+{{- end }}
